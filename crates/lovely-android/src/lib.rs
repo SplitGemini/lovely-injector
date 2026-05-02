@@ -1,6 +1,6 @@
 mod lualib;
 
-use lovely_core::{log::*, config};
+use lovely_core::log::*;
 use lovely_core::sys::LuaState;
 use lualib::LUA_LIBRARY;
 use std::path::PathBuf;
@@ -13,7 +13,7 @@ use jni::sys::{jint, jvalue};
 
 use lovely_core::Lovely;
 
-static RUNTIME: OnceLock<Lovely> = OnceLock::new();
+static RUNTIME: OnceLock<&'static Lovely> = OnceLock::new();
 
 static RECALL: LazyLock<
     unsafe extern "C" fn(*mut LuaState, *const u8, usize, *const u8, *const u8) -> u32,
@@ -80,13 +80,9 @@ unsafe extern "C" fn JNI_OnLoad(jvm: JavaVM, _: *mut c_void) -> jint {
 
     let mut env = jvm.get_env().unwrap();
     let external_files_dir = get_external_files_dir(&mut env).expect("Failed to get external files directory.");
-    let config = config::LovelyConfig {
-        dump_all: false,
-        vanilla: false,
-        mod_dir: Some(external_files_dir.join("mods")),
-    };
-    
-    let rt = Lovely::init(&|a, b, c, d, e| RECALL(a, b, c, d, e), lualib::get_lualib(), config);
+    std::env::set_var("LOVELY_MOD_DIR", external_files_dir.join("mods"));
+
+    let rt = Lovely::init(&|a, b, c, d, e| RECALL(a, b, c, d, e), lualib::get_lualib(), false);
     RUNTIME
         .set(rt)
         .unwrap_or_else(|_| panic!("Failed to instantiate runtime."));

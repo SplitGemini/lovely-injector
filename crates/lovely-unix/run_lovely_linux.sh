@@ -1,6 +1,7 @@
 #!/bin/sh
 gamename="Balatro"
-defaultpath="/home/$USER/.local/share/Steam/steamapps/common/$gamename"
+exename="$gamename"
+defaultpath="$HOME/.local/share/Steam/steamapps/common/$gamename"
 
 cd "$defaultpath"
-LD_PRELOAD=liblovely.so love Balatro.exe "$@"
+LD_PRELOAD=liblovely.so love $exename.exe "$@"

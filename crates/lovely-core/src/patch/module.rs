@@ -1,11 +1,11 @@
 use std::{
     ffi::CString,
-    fs,
     path::{Path, PathBuf},
     ptr,
 };
 
-use crate::sys::{self, lua_identity_closure, LuaState};
+use crate::sys::{self, lua_identity_closure, lua_err_identity_closure, LuaState, LuaStateTrait};
+use crate::RUNTIME;
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -20,41 +20,35 @@ pub struct ModulePatch {
     // If enabled, evaluate the module immediately upon loading it
     #[serde(default)]
     pub load_now: bool,
-    // Used for the display name of the source. Is the relative path to the source.
+
+    // Used for display name of the source. Is the relative path.
     #[serde(skip)]
     pub display_source: String,
+
+    // Preloaded at load time
+    #[serde(skip)]
+    pub content: String,
 }
 
 impl ModulePatch {
-    /// Apply a module patch by loading the input file(s) into memory, calling lual_loadbufferx
-    /// on them, and then injecting them into the global `package.preload` table.
+    /// Apply a module patch by loading the input file(s) into memory and injecting them into
+    /// the global `package.preload` table.
     ///
     /// # Safety
     /// This function is unsafe as it interfaces directly with a series of dynamically loaded
     /// native lua functions.
-    pub unsafe fn apply<F: Fn(*mut LuaState, *const u8, usize, *const u8, *const u8) -> u32>(
+    pub unsafe fn apply(
         &self,
         file_name: &str,
         state: *mut LuaState,
         path: &Path,
-        lual_loadbufferx: &F,
-    ) -> bool {
-        if self.load_now && self.before.is_none() {
-            panic!("Error at patch file {}:\nModule \"{}\" has \"load_now\" set to true, but does not have required parameter \"before\" set", path.display(), self.name);
-        }
+    ) -> Result<bool, String> {
         // Stop if we're not at the correct insertion point.
         if self.load_now && self.before.as_ref().unwrap() != file_name {
-            return false;
+            return Ok(false);
         }
 
-        // Read the source file in as [u8]
-        let source = fs::read(&self.source).unwrap_or_else(|e| {
-            panic!(
-                "Failed to read module source file for module patch from {} at {:?}: {e:?}",
-                path.display(),
-                &self.source
-            )
-        });
+        let source = self.content.as_bytes();
         let source_len = source.len();
 
         let name = format!("=[lovely {} \"{}\"]", &self.name, &self.display_source);
@@ -69,7 +63,9 @@ impl ModulePatch {
         let field_index = sys::lua_gettop(state);
 
         // Load the buffer and execute it via lua_pcall, pushing the result to the top of the stack.
-        let return_code = lual_loadbufferx(
+        let lovely = &RUNTIME.get().unwrap();
+
+        let return_code = lovely.apply_buffer_patches(
             state,
             source.as_ptr(),
             source_len,
@@ -79,12 +75,21 @@ impl ModulePatch {
 
         if return_code != 0 {
             log::error!(
-                "Failed to load module {} for module patch from {}",
+                "Failed to load module {} for module patch from {}:",
                 self.name,
                 path.display()
             );
+            let err = state.to_string(-1);
+            log::error!("Error: {err}");
+            state.push_closure(lua_err_identity_closure, 1);
+            let module_cstr = CString::new(self.name.clone()).unwrap();
+            sys::lua_setfield(state, field_index, module_cstr.into_raw() as _);
             sys::lua_settop(state, stack_top);
-            return false;
+            if self.load_now {
+                return Err("An error occured loading a load_now module:\n\nError: ".to_owned() + &err);
+            } else {
+                return Ok(false);
+            }
         }
 
         if self.load_now {
@@ -92,15 +97,21 @@ impl ModulePatch {
             let return_code = sys::lua_pcall(state, 0, 1, 0);
             if return_code != 0 {
                 log::error!(
-                    "Evaluation of module {} failed for module patch from {}",
+                    "Evaluation of module {} failed for module patch from {}:",
                     self.name,
                     path.display()
                 );
+                let err = state.to_string(-1);
+                log::error!("Error: {err}");
+                state.push_closure(lua_err_identity_closure, 1);
+                let module_cstr = CString::new(self.name.clone()).unwrap();
+                sys::lua_setfield(state, field_index, module_cstr.into_raw() as _);
                 sys::lua_settop(state, stack_top);
-                return false;
+                sys::lua_settop(state, stack_top);
+                return Err("An error occured evaluating a load_now module:\n\nError: ".to_owned() + &err);
             }
             // Wrap this in the identity closure function
-            sys::lua_pushcclosure(state, lua_identity_closure, 1);
+            state.push_closure(lua_identity_closure, 1);
         }
 
         // Insert results onto the package.preload global table.
@@ -108,6 +119,6 @@ impl ModulePatch {
         sys::lua_setfield(state, field_index, module_cstr.into_raw() as _);
         // Always ensure that the lua stack is in good order
         sys::lua_settop(state, stack_top);
-        true
+        Ok(true)
     }
 }

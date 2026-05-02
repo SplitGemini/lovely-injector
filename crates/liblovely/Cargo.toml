@@ -1,15 +1,14 @@
 [package]
-name = "lovely-unix"
+name = "liblovely"
 version = "0.1.0"
 edition = "2021"
 
 [lib]
 name = "lovely"
-crate-type = ["cdylib"]
+crate-type = ["staticlib"]
 
 [dependencies]
 lovely-core = { version ="0.9.0", path = "../lovely-core" }
 
-libloading = "0.8.6"
+once_cell = "1.19.0"
 ctor = "0.2.7"
-dobby-rs = "0.1.0"

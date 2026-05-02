@@ -8,10 +8,10 @@ Lovely is a lua injector which embeds code into a [LÖVE 2d](https://love2d.org/
 
 1. Download the [latest release](https://github.com/ethangreen-dev/lovely-injector/releases) for Windows. This will be `lovely-x86_64-pc-windows-msvc.zip`.
 2. Open the .zip archive, copy `version.dll` into the game directory. You can navigate to the game's directory by right-clicking the game in Steam, hovering "Manage", and selecting "Browse local files".
-3. Put one or more mods into the mod directory (NOT the same as the game directory). If you are modding Balatro, this should be
+3. Put one or more mods into the mod directory (NOT the same as the game directory). You may need to create the `Mods` folder yourself, or launch Balatro with lovely installed once to create it automatically. If you are modding Balatro, this should be
 * `%AppData%/Balatro/Mods` on Windows
-* [`~/.steam/steam/steamapps/compatdata/2379780/pfx/drive_c/users/steamuser/AppData/Roaming/Balatro`](https://steamcommunity.com/sharedfiles/filedetails/?id=3178949415) on Steam Deck (`~/` will be called *Home* if you are moving files in the GUI file manager)
-* Flatpak version of Steam: `~/.var/app/com.valvesoftware.Steam/.steam/steam/steamapps/compatdata/2379780/pfx/drive_c/users/steamuser/AppData/Roaming/Balatro`
+* [`~/.steam/steam/steamapps/compatdata/2379780/pfx/drive_c/users/steamuser/AppData/Roaming/Balatro/Mods`](https://steamcommunity.com/sharedfiles/filedetails/?id=3178949415) on Steam Deck (`~/` will be called *Home* if you are moving files in the GUI file manager)
+* Flatpak version of Steam: `~/.var/app/com.valvesoftware.Steam/.steam/steam/steamapps/compatdata/2379780/pfx/drive_c/users/steamuser/AppData/Roaming/Balatro/Mods`
 5. **<ins>Only Steam Deck / Proton / Wine</ins>** Set your game's launch options in Steam to `WINEDLLOVERRIDES="version=n,b" %command%`.
 6. Run the game through Steam.
 
@@ -25,7 +25,15 @@ If you can't find this folder, try pressing `Shift-Command-.` (period) to show h
 
 Note: You cannot run your game through Steam on Mac due to a bug within the Steam client. You must run it with the `run_lovely_macos.sh` script.
 
-**Important**: Mods with Lovely patch files (`lovely.toml` or in `lovely/*.toml`) **must** be installed into their own folder within the mod directory. No exceptions!
+**Important**: Mods with Lovely patch files (`lovely.toml` or in `lovely/*.toml`) **must** be installed into their own folder (or zip file) within the mod directory. No exceptions!
+
+### Linux Native
+
+1. Install `love` using your distribution's package manager. This is `sudo pacman -S love` on SteamOS and Arch-based distros, and `sudo apt install love` on Ubuntu & Debian-based ones.
+2. Download the [latest release](https://github.com/ethangreen-dev/lovely-injector/releases) for Linux. This will be `x86_64-unknown-linux-gnu.tar.gz`.
+3. Open the .tar.gz archive, copy `liblovely.so` and `run_lovely_linux.sh` into the game directory. You can navigate to the game's directory by right-clicking the game in Steam, hovering "Manage", and selecting "Browse local files".
+4. Put one or more mods into the mod directory (NOT the same as the game directory). If you are modding Balatro, this should be `~/.local/share/love/Mods`.
+5. Run the game by executing `./run_lovely_linux.sh` in the terminal within the game directory (you can copy this file into the directory of choice).
 
 ## Patches
 
@@ -62,7 +70,7 @@ initSteamodded()
 print('{{lovely:var_name}}')
 '''
 match_indent = true
-times = 1
+times = 1 # Optional, when omitted all instances of the pattern will be replaced. Otherwise the first <times> instances will be replaced. 
 
 # Inject one or more lines of code before, after, at, or interwoven into one or more
 # Regex capture groups.
@@ -108,6 +116,7 @@ sources = [
     "debug/debug.lua",
     "loader/loader.lua",
 ]
+payload = "-- I'm extra code that isn't worth an extra file"
 
 # Inject a new module into the game *before* a target file it loaded.
 # USEFUL: For when you want to silo your code into a separate require-able module OR inject a "global" dependency before game / mod code begins execution.
@@ -127,13 +136,17 @@ name = "nativefs"
 
 ### Patch files
 
-Patch files are loaded from mod directories inside of the mod folder (`MOD_DIR`). Lovely will load any patch files present within `MOD_DIR/ModName/lovely/` or load a single patch from `MOD_DIR/ModName/lovely.toml`. If multiple patches are loaded they will be injected into the game in the order in which they are found.
+Patch files are loaded from mod directories inside of the mod folder (`MOD_DIR`). Lovely will load any patch files present within `MOD_DIR/ModName/lovely/` or load a single patch from `MOD_DIR/ModName/lovely.toml`. If multiple patches are loaded they will be injected into the game in the order by order of their priority.
 
 Paths defined within the patch are rooted by the mod's directory. For example, `core/deck.lua` resolves to `MOD_DIR/ModName/core/deck.lua`.
 
 ### Patch targets
 
-Each patch definition has a single patch target. These targets are the relative paths of source files when dumped from the game with a tool like 7zip. For example, one can target a top-level file like `main.lua`, or one in a subdirectory like `engine/event.lua`.
+Each patch definition has a single patch target. These targets are typically the relative paths of source files when dumped from the game with a tool like 7zip. For example, one can target a top-level file like `main.lua`, or one in a subdirectory like `engine/event.lua`.
+
+For certain games/libraries, files are loaded differently. Targets (or more specifically buffer names) can be arbitrarily anything.
+
+Lovely itself uses the format of `=[lovely <patchname> "<relative path to mod>"]` for buffers loaded via module patch.
 
 ### Patch debugging
 

@@ -11,9 +11,8 @@ use std::{
 };
 
 use lovely_core::Lovely;
-use lovely_core::config::LovelyConfig;
 
-static RUNTIME: OnceLock<Lovely> = OnceLock::new();
+static RUNTIME: OnceLock<&Lovely> = OnceLock::new();
 
 type LoadBuffer =
     unsafe extern "C" fn(*mut LuaState, *const u8, usize, *const u8, *const u8) -> u32;
@@ -70,9 +69,13 @@ unsafe fn construct() {
         return;
     }
 
-    let config = LovelyConfig::parse_args(&args);
+    let dump_all = args.contains(&"--dump-all".to_string());
 
-    let rt = Lovely::init(&|a, b, c, d, e| RECALL(a, b, c, d, e), lualib::get_lualib(), config);
+    let rt = Lovely::init(
+        &|a, b, c, d, e| RECALL(a, b, c, d, e),
+        lualib::get_lualib(),
+        dump_all,
+    );
     RUNTIME
         .set(rt)
         .unwrap_or_else(|_| panic!("Failed to instantiate runtime."));

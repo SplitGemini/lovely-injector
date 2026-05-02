@@ -1,21 +1,22 @@
 use std::path::Path;
 
-use regex_cursor::Input;
 use regex_cursor::engines::meta::Regex;
-use regex_cursor::regex_automata::util::syntax;
 use regex_cursor::regex_automata::util::interpolate;
+use regex_cursor::regex_automata::util::syntax;
+use regex_cursor::Input;
 
-use itertools::Itertools;
 use crop::Rope;
-use serde::{Serialize, Deserialize};
+use itertools::Itertools;
+use serde::{Deserialize, Serialize};
 
 use crate::chunk_vec_cursor::IntoCursor;
+use crate::dump::{ByteDebugEntry, ByteRegion, PatchSource, DebugPatchType};
 
-use super::InsertPosition;
+use super::{InsertPosition, Target};
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct RegexPatch {
-    pub target: String,
+    pub target: Target,
 
     // The Regex pattern that will be used to both match and create capture groups.
     pub pattern: String,
@@ -42,32 +43,55 @@ pub struct RegexPatch {
     // If enabled, whitespace is ignored unless escaped
     #[serde(default)]
     pub verbose: bool,
+
+    // Currently unused.
+    pub name: Option<String>,
 }
 
 impl RegexPatch {
-    pub fn apply(&self, target: &str, rope: &mut Rope, path: &Path) -> bool {
-        if self.target != target {
-            return false;
+    pub fn debug_from_warning_string(&self, path: &Path, warning: String) -> ByteDebugEntry {
+        log::warn!("{}", warning);
+        ByteDebugEntry {
+            patch_source: PatchSource {
+                file: path.display().to_string(),
+                pattern: Some(self.pattern.clone()),
+                patch_type: DebugPatchType::Regex,
+            },
+            regions: Vec::new(),
+            warnings: Some(vec![warning.to_string()]),
+        }
+    }
+
+    pub fn apply(&self, target: &str, rope: &mut Rope, path: &Path) -> Option<ByteDebugEntry> {
+        if !self.target.can_apply(target) {
+            return None;
         }
 
         let input = Input::new(rope.into_cursor());
         let re = Regex::builder()
             .syntax(
-                 syntax::Config::new()
+                syntax::Config::new()
                     .multi_line(true)
                     .crlf(true)
-                    .ignore_whitespace(self.verbose)
+                    .ignore_whitespace(self.verbose),
             )
             .build(&self.pattern)
-            .unwrap_or_else(|e| panic!("Failed to compile Regex '{}' for regex patch from {}: {e:?}", path.display(), self.pattern));
+            .unwrap_or_else(|e| {
+                panic!(
+                    "Failed to compile Regex '{}' for regex patch from {}: {e:?}",
+                    path.display(),
+                    self.pattern
+                )
+            });
 
         let mut captures = re.captures_iter(input).collect_vec();
         if captures.is_empty() {
-            log::warn!("Regex '{}' on target '{target}' for regex patch from {} resulted in no matches", self.pattern.escape_debug(), path.display());
-            return false;
+            let warning = format!("Regex '{}' on target '{target}' for regex patch from {} resulted in no matches", self.pattern.escape_debug(), path.display());
+            return Some(self.debug_from_warning_string(path, warning));
         }
+        let mut warnings = Vec::new();
         if let Some(times) = self.times {
-            fn warn_regex_mismatch(pattern: &str, target: &str, found_matches: usize, wanted_matches: usize, path: &Path) {
+            fn warn_regex_mismatch(pattern: &str, target: &str, found_matches: usize, wanted_matches: usize, path: &Path) -> String {
                 let warn_msg: String = if pattern.lines().count() > 1 {
                     format!("Regex '''\n{pattern}''' on target '{target}' for regex patch from {} resulted in {found_matches} matches, wanted {wanted_matches}", path.display())
                 } else {
@@ -76,20 +100,24 @@ impl RegexPatch {
                 for line in warn_msg.lines() {
                     log::warn!("{}", line)
                 }
+                warn_msg
             }
             if captures.len() < times {
-                warn_regex_mismatch(&self.pattern, target, captures.len(), times, path);
+                warnings.push(warn_regex_mismatch(&self.pattern, target, captures.len(), times, path));
             }
             if captures.len() > times {
-                warn_regex_mismatch(&self.pattern, target, captures.len(), times, path);
+                warnings.push(warn_regex_mismatch(&self.pattern, target, captures.len(), times, path));
                 log::warn!("Ignoring excess matches");
+                warnings.push("Ignoring excess matches".to_string());
                 captures.truncate(times);
             }
         }
 
-        // This is our running byte offset. We use this to ensure that byte references
-        // within the capture group remain valid even after the rope has been mutated.
+        // Running byte offset to keep byte references valid after rope mutations.
         let mut delta = 0_isize;
+
+        // Collect byte regions during patching.
+        let mut byte_regions: Vec<ByteRegion> = Vec::new();
 
         for groups in captures {
             // Get the entire captured span (index 0);
@@ -116,16 +144,12 @@ impl RegexPatch {
                     let pid = groups.pattern().unwrap();
                     groups.group_info().to_index(pid, name)
                 },
-                &mut line_prepend
+                &mut line_prepend,
             );
 
             // Cleanup and convert the specified root capture to a span.
             let target_group = {
-                let group_name = self
-                    .root_capture
-                    .as_deref()
-                    .unwrap_or("0")
-                    .replace('$', "");
+                let group_name = self.root_capture.as_deref().unwrap_or("0").replace('$', "");
 
                 if let Ok(idx) = group_name.parse::<usize>() {
                     groups.get_group(idx)
@@ -141,9 +165,9 @@ impl RegexPatch {
             let target_start = (target_group.start as isize + delta) as usize;
             let target_end = (target_group.end as isize + delta) as usize;
 
-            let new_payload = std::format!("{}", 
-                self
-                    .payload
+            let new_payload = std::format!(
+                "{}",
+                self.payload
                     .split_inclusive('\n')
                     .format_with("", |x, f| f(&format_args!("{}{}", line_prepend, x)))
             );
@@ -168,12 +192,12 @@ impl RegexPatch {
                     let pid = groups.pattern().unwrap();
                     groups.group_info().to_index(pid, name)
                 },
-                &mut payload
+                &mut payload,
             );
 
-            // If left border of insertion is a wordchar -> non-wordchar 
-            // boundary and our patch starts with a wordchar, prepend space so 
-            // it doesn't unintentionally concatenate with characters to its 
+            // If left border of insertion is a wordchar -> non-wordchar
+            // boundary and our patch starts with a wordchar, prepend space so
+            // it doesn't unintentionally concatenate with characters to its
             // left to create a larger identifier.
             if payload.starts_with(|x: char| x.is_ascii_alphanumeric() || x == '_') {
                 let pre_pt = if let InsertPosition::After = self.position {
@@ -189,10 +213,10 @@ impl RegexPatch {
                 }
             }
 
-            // If right border of insertion is a non-wordchar -> wordchar 
-            // boundary and our patch ends with a wordchar, append space so 
-            // it doesn't unintentionally concatenate with characters to its 
-            // right to create a larger identifier.     
+            // If right border of insertion is a non-wordchar -> wordchar
+            // boundary and our patch ends with a wordchar, append space so
+            // it doesn't unintentionally concatenate with characters to its
+            // right to create a larger identifier.
             if payload.ends_with(|x: char| x.is_ascii_alphanumeric() || x == '_') {
                 let post_pt = if let InsertPosition::Before = self.position {
                     target_start
@@ -207,27 +231,37 @@ impl RegexPatch {
                 }
             }
 
+            let payload_bytes = payload.len();
+
             match self.position {
                 InsertPosition::Before => {
                     rope.insert(target_start, &payload);
-                    let new_len = payload.len();
-                    delta += new_len as isize;
+                    byte_regions.push(ByteRegion { start: target_start, end: target_start + payload_bytes, delta: payload_bytes as isize });
+                    delta += payload_bytes as isize;
                 }
                 InsertPosition::After => {
                     rope.insert(target_end, &payload);
-                    let new_len = payload.len();
-                    delta += new_len as isize;
+                    byte_regions.push(ByteRegion { start: target_end, end: target_end + payload_bytes, delta: payload_bytes as isize });
+                    delta += payload_bytes as isize;
                 }
                 InsertPosition::At => {
+                    let old_len = target_group.end - target_group.start;
                     rope.delete(target_start..target_end);
                     rope.insert(target_start, &payload);
-                    let old_len = target_group.end - target_group.start;
-                    let new_len = payload.len();
+                    byte_regions.push(ByteRegion { start: target_start, end: target_start + payload_bytes, delta: payload_bytes as isize - old_len as isize });
                     delta -= old_len as isize;
-                    delta += new_len as isize;
+                    delta += payload_bytes as isize;
                 }
             }
         }
-        true
+
+        Some(ByteDebugEntry {
+            patch_source: PatchSource {
+                file: path.display().to_string(),
+                pattern: Some(self.pattern.clone()),
+                patch_type: DebugPatchType::Regex,
+            },
+            regions: byte_regions,
+            warnings: if warnings.is_empty() {None} else {Some(warnings)}, })
     }
 }

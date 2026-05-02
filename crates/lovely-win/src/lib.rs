@@ -4,12 +4,11 @@ use std::env;
 use std::ffi::c_void;
 use std::panic;
 use std::sync::{LazyLock, OnceLock};
-
+use anyhow::Context;
 use itertools::Itertools;
 use lovely_core::log::*;
 use lovely_core::sys::LuaState;
 use lovely_core::Lovely;
-use config::LovelyConfig;
 use lovely_core::LOVELY_VERSION;
 
 use retour::static_detour;
@@ -20,10 +19,11 @@ use windows::Win32::System::Console::{AllocConsole, SetConsoleTitleW};
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MESSAGEBOX_STYLE};
 
-static RUNTIME: OnceLock<Lovely> = OnceLock::new();
+static RUNTIME: OnceLock<&Lovely> = OnceLock::new();
 
 static_detour! {
     pub static LuaLoadbufferx_Detour: unsafe extern "C" fn(*mut LuaState, *const u8, usize, *const u8,*const u8) -> u32;
+    pub static LuaLoadbuffer_Detour: unsafe extern "C" fn(*mut LuaState, *const u8, usize, *const u8) -> u32;
 }
 
 static WIN_TITLE: LazyLock<U16CString> =
@@ -58,6 +58,8 @@ unsafe extern "system" fn DllMain(_: HINSTANCE, reason: u32, _: *const c_void) -
             PCWSTR(WIN_TITLE.as_ptr()),
             MESSAGEBOX_STYLE(0),
         );
+        
+        std::process::abort();
     }));
 
     let args = env::args().collect_vec();
@@ -75,13 +77,18 @@ unsafe extern "system" fn DllMain(_: HINSTANCE, reason: u32, _: *const c_void) -
         SetConsoleTitleW(PCWSTR(WIN_TITLE.as_ptr())).expect("Failed to set console title.");
     }
 
-    let config = LovelyConfig::parse_args(&args);
+    let dump_all = args.contains(&"--dump-all".to_string());
 
     // Initialize the lovely runtime.
     let rt = Lovely::init(
         &|a, b, c, d, e| LuaLoadbufferx_Detour.call(a, b, c, d, e),
-        lualib::get_lualib(),
-        config,
+        lualib::get_lualib().with_context( ||
+            format!("\n\nIf you did not intend to launch with lovely, \
+                    ensure it is not present where it shouldn't be. \
+                    Lovely is present alongside \
+                    {}", args[0])
+        ).unwrap(),
+        dump_all,
     );
     RUNTIME
         .set(rt)
@@ -91,8 +98,8 @@ unsafe extern "system" fn DllMain(_: HINSTANCE, reason: u32, _: *const c_void) -
     let handle = LoadLibraryW(w!("lua51.dll")).unwrap();
     let proc = GetProcAddress(handle, s!("luaL_loadbufferx")).unwrap();
     let fn_target = std::mem::transmute::<
-        _,
-        unsafe extern "C" fn(*mut c_void, *const u8, usize, *const u8, *const u8) -> u32,
+        unsafe extern "system" fn() -> isize, 
+        unsafe extern "C" fn(*mut std::ffi::c_void, *const u8, usize, *const u8, *const u8) -> u32
     >(proc);
 
     LuaLoadbufferx_Detour
@@ -100,6 +107,20 @@ unsafe extern "system" fn DllMain(_: HINSTANCE, reason: u32, _: *const c_void) -
             lua_loadbufferx_detour(a, b, c, d, e)
         })
         .unwrap()
+        .enable()
+        .unwrap();
+
+    let proc = GetProcAddress(handle, s!("luaL_loadbuffer")).unwrap();
+    let fn_target = std::mem::transmute::<
+        unsafe extern "system" fn() -> isize, 
+        unsafe extern "C" fn(*mut std::ffi::c_void, *const u8, usize, *const u8) -> u32
+    >(proc);
+
+    LuaLoadbuffer_Detour
+        .initialize(fn_target, |a, b, c, d| {
+            lua_loadbufferx_detour(a, b, c, d, std::ptr::null())
+        })
+    .unwrap()
         .enable()
         .unwrap();
 
