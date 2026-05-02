@@ -3,13 +3,10 @@ mod lualib;
 use lovely_core::log::*;
 use lovely_core::sys::LuaState;
 use lualib::LUA_LIBRARY;
-use std::path::PathBuf;
 use std::{ffi::c_void, mem, panic, sync::{LazyLock, OnceLock}};
 
-
-use jni::{JNIEnv, JNIVersion, JavaVM};
-use jni::objects::JString;
-use jni::sys::{jint, jvalue};
+use jni::{JNIVersion, JavaVM};
+use jni::sys::jint;
 
 use lovely_core::Lovely;
 
@@ -56,31 +53,15 @@ unsafe extern "C" fn luaL_loadbuffer(
     rt.apply_buffer_patches(state, buf_ptr, size, name_ptr, std::ptr::null())
 }
 
-unsafe fn get_external_files_dir(env: &mut JNIEnv) -> Result<PathBuf, jni::errors::Error> {
-    let activity_thread_class = env.find_class("android/app/ActivityThread")?;
-    let context_class = env.find_class("android/content/Context")?;
-    let external_files_dir_method = env.get_method_id(context_class, "getExternalFilesDir", "(Ljava/lang/String;)Ljava/io/File;")?;
-
-    let activity_thread = env.call_static_method(activity_thread_class, "currentActivityThread", "()Landroid/app/ActivityThread;", &[])?.l()?;
-    let context = env.call_method(activity_thread, "getApplication", "()Landroid/app/Application;", &[])?.l()?;
-    let external_files_dir = env.call_method_unchecked(context, external_files_dir_method, jni::signature::ReturnType::Object, &[jvalue{l: std::ptr::null_mut()}])?.l()?;
-    let external_files_dir_string: JString = env.call_method(external_files_dir, "getAbsolutePath", "()Ljava/lang/String;", &[])?.l()?.into();
-    let utf8 = env.get_string(&external_files_dir_string)?;
-    
-    Ok(PathBuf::from(utf8.to_str().unwrap()))
-}
-
 #[allow(non_snake_case)]
 #[no_mangle]
-unsafe extern "C" fn JNI_OnLoad(jvm: JavaVM, _: *mut c_void) -> jint {    
+unsafe extern "C" fn JNI_OnLoad(_jvm: JavaVM, _: *mut c_void) -> jint {
     panic::set_hook(Box::new(|x| {
         let message = format!("lovely-injector has crashed: \n{x}");
         error!("{message}");
     }));
 
-    let mut env = jvm.get_env().unwrap();
-    let external_files_dir = get_external_files_dir(&mut env).expect("Failed to get external files directory.");
-    std::env::set_var("LOVELY_MOD_DIR", external_files_dir.join("mods"));
+    std::env::set_var("LOVELY_MOD_DIR", "/storage/emulated/0/Documents/Balatro/mods");
 
     let rt = Lovely::init(&|a, b, c, d, e| RECALL(a, b, c, d, e), lualib::get_lualib(), false);
     RUNTIME
